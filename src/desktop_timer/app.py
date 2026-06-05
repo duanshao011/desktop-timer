@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime, timedelta
 
 from .task_history import (
@@ -40,6 +41,10 @@ RECEIPT_HEADER_HEIGHT = 32
 RECEIPT_ROW_HEIGHT = 20
 RECEIPT_FOOTER = 10
 
+MARQUEE_SPEED = 50
+MARQUEE_PAUSE = 1.5
+MARQUEE_INTERVAL = 50
+
 ORB_SIZE = 56
 DOCK_THRESHOLD = 12
 CLICK_TOLERANCE = 5
@@ -68,6 +73,13 @@ class TimerApp:
         self.tick_job: str | None = None
 
         self.task_var = tk.StringVar()
+        self._marquee_offset = 0.0
+        self._marquee_job: str | None = None
+        self._time_font = tkfont.Font(family="Consolas", size=9, weight="bold")
+        self._name_font = tkfont.Font(family="Microsoft YaHei UI", size=8)
+        self._running_name_font = tkfont.Font(family="Microsoft YaHei UI", size=9)
+        self._running_time_font = tkfont.Font(family="Consolas", size=10, weight="bold")
+        self._row_name_right = 176 - self._running_time_font.measure("00:00:00") - 4
 
         self._build_ui()
         self._apply_geometry()
@@ -134,12 +146,17 @@ class TimerApp:
         if self.docked:
             self.canvas.itemconfigure(self.entry_window, state="hidden")
             self._draw_orb()
+            self._stop_marquee()
             return
         self.canvas.itemconfigure(self.entry_window, state="normal")
         self._draw_top_bar()
-        self._draw_running_rows()
+        needs_marquee = self._draw_running_rows()
         if self.tasks_expanded:
-            self._draw_receipt()
+            needs_marquee = self._draw_receipt() or needs_marquee
+        if needs_marquee:
+            self._ensure_marquee_running()
+        else:
+            self._stop_marquee()
         self.canvas.tag_raise(self.entry_window)
 
     def _round_rect(self, x1: int, y1: int, x2: int, y2: int, r: int, **kw: object) -> int:
@@ -184,8 +201,13 @@ class TimerApp:
             c.tag_bind(it, "<Enter>", lambda _e: c.configure(cursor="hand2"))
             c.tag_bind(it, "<Leave>", lambda _e: c.configure(cursor=""))
 
-    def _draw_running_rows(self) -> None:
+    def _draw_running_rows(self) -> bool:
         c = self.canvas
+        needs_marquee = False
+        nl = 22
+        nr = self._row_name_right
+        nw = nr - nl
+
         for i, task in enumerate(self.running):
             y_base = BAR_HEIGHT + i * TASK_ROW_HEIGHT
             y_center = y_base + TASK_ROW_HEIGHT // 2
@@ -193,13 +215,37 @@ class TimerApp:
             self._round_rect(3, y_base + 2, BAR_WIDTH - 3, y_base + TASK_ROW_HEIGHT - 2, 8,
                              fill=BG_DARK, outline=BORDER, width=1, tags="drawn")
 
-            dot_color = AMBER if task.state == "running" else GREEN
-            c.create_oval(12 - 4, y_center - 4, 12 + 4, y_center + 4,
-                          fill=dot_color, outline="", tags="drawn")
+            text_w = self._running_name_font.measure(task.name)
 
-            name = task.name if len(task.name) <= 8 else task.name[:7] + "…"
-            c.create_text(22, y_center, text=name, anchor="w",
-                          fill=TEXT_PRIMARY, font=("Microsoft YaHei UI", 9), tags="drawn")
+            if text_w <= nw:
+                dot_color = AMBER if task.state == "running" else GREEN
+                c.create_oval(12 - 4, y_center - 4, 12 + 4, y_center + 4,
+                              fill=dot_color, outline="", tags="drawn")
+                c.create_text(nl, y_center, text=task.name, anchor="w",
+                              fill=TEXT_PRIMARY, font=("Microsoft YaHei UI", 9), tags="drawn")
+            else:
+                needs_marquee = True
+                excess = text_w - nw
+                scroll_t = excess / MARQUEE_SPEED
+                cycle = MARQUEE_PAUSE + scroll_t + MARQUEE_PAUSE
+                phase = self._marquee_offset % cycle
+                if phase < MARQUEE_PAUSE:
+                    x_off = 0
+                elif phase < MARQUEE_PAUSE + scroll_t:
+                    x_off = -((phase - MARQUEE_PAUSE) / scroll_t) * excess
+                else:
+                    x_off = -excess
+                c.create_text(nl + x_off, y_center, text=task.name, anchor="w",
+                              fill=TEXT_PRIMARY, font=("Microsoft YaHei UI", 9), tags="drawn")
+                mt = y_base + 3
+                mb = y_base + TASK_ROW_HEIGHT - 3
+                c.create_rectangle(0, mt, nl, mb,
+                                   fill=BG_DARK, outline="", tags="drawn")
+                c.create_rectangle(nr, mt, BAR_WIDTH, mb,
+                                   fill=BG_DARK, outline="", tags="drawn")
+                dot_color = AMBER if task.state == "running" else GREEN
+                c.create_oval(12 - 4, y_center - 4, 12 + 4, y_center + 4,
+                              fill=dot_color, outline="", tags="drawn")
 
             elapsed = int(task.elapsed_seconds())
             hours, rem = divmod(elapsed, 3600)
@@ -210,6 +256,8 @@ class TimerApp:
 
             self._draw_row_pause(task, 196, y_center)
             self._draw_row_done(task, 220, y_center)
+
+        return needs_marquee
 
     def _draw_row_pause(self, task: RunningTask, cx: int, cy: int) -> None:
         c = self.canvas
@@ -244,7 +292,7 @@ class TimerApp:
             c.tag_bind(it, "<Enter>", lambda _e: c.configure(cursor="hand2"))
             c.tag_bind(it, "<Leave>", lambda _e: c.configure(cursor=""))
 
-    def _draw_receipt(self) -> None:
+    def _draw_receipt(self) -> bool:
         c = self.canvas
         top = BAR_HEIGHT + len(self.running) * TASK_ROW_HEIGHT + RECEIPT_TOP_OFFSET
         left, right = 20, BAR_WIDTH - 20
@@ -281,21 +329,79 @@ class TimerApp:
             c.create_text((left + right) // 2, top + RECEIPT_HEADER_HEIGHT + 10,
                           text="终止后吐出小票", fill=RECEIPT_MUTED,
                           font=("Microsoft YaHei UI", 8), tags="drawn")
-            return
+            return False
 
+        max_time_w = 0
+        for task in self.completed_tasks:
+            s, d, _ = format_task_row(task)
+            tw = self._time_font.measure(f"{s} {d}")
+            max_time_w = max(max_time_w, tw)
+        name_left = min(left + 10 + max_time_w + 6, right - 40)
+        name_right = right - 10
+        name_area_w = name_right - name_left
+
+        needs_marquee = False
         row_y = top + RECEIPT_HEADER_HEIGHT + 4
         for task in self.completed_tasks:
             started, duration, name = format_task_row(task)
-            name = name if len(name) <= 6 else f"{name[:5]}…"
+            display_name = name
             if task.merge_count >= 2:
-                name = f"{name} ×{task.merge_count}"
-            c.create_text(left + 10, row_y, text=f"{started} {duration}", anchor="w",
-                          fill=RECEIPT_TEXT, font=("Consolas", 9, "bold"), tags="drawn")
-            c.create_text(right - 10, row_y, text=name, anchor="e",
-                          fill=RECEIPT_MUTED, font=("Microsoft YaHei UI", 8), tags="drawn")
+                display_name = f"{name} ×{task.merge_count}"
+            time_str = f"{started} {duration}"
+            text_w = self._name_font.measure(display_name)
+
+            if text_w <= name_area_w:
+                c.create_text(left + 10, row_y, text=time_str, anchor="w",
+                              fill=RECEIPT_TEXT, font=("Consolas", 9, "bold"), tags="drawn")
+                c.create_text(name_left, row_y, text=display_name, anchor="w",
+                              fill=RECEIPT_MUTED, font=("Microsoft YaHei UI", 8), tags="drawn")
+            else:
+                needs_marquee = True
+                excess = text_w - name_area_w
+                scroll_t = excess / MARQUEE_SPEED
+                cycle = MARQUEE_PAUSE + scroll_t + MARQUEE_PAUSE
+                phase = self._marquee_offset % cycle
+                if phase < MARQUEE_PAUSE:
+                    x_off = 0
+                elif phase < MARQUEE_PAUSE + scroll_t:
+                    x_off = -((phase - MARQUEE_PAUSE) / scroll_t) * excess
+                else:
+                    x_off = -excess
+                c.create_text(name_left + x_off, row_y, text=display_name, anchor="w",
+                              fill=RECEIPT_MUTED, font=("Microsoft YaHei UI", 8), tags="drawn")
+                mt = row_y - RECEIPT_ROW_HEIGHT // 2 + 1
+                mb = row_y + RECEIPT_ROW_HEIGHT // 2 - 1
+                c.create_rectangle(0, mt, left, mb,
+                                   fill=TRANSPARENT, outline="", tags="drawn")
+                c.create_rectangle(left, mt, name_left, mb,
+                                   fill=RECEIPT_PAPER, outline="", tags="drawn")
+                c.create_rectangle(name_right, mt, right, mb,
+                                   fill=RECEIPT_PAPER, outline="", tags="drawn")
+                c.create_rectangle(right, mt, BAR_WIDTH, mb,
+                                   fill=TRANSPARENT, outline="", tags="drawn")
+                c.create_text(left + 10, row_y, text=time_str, anchor="w",
+                              fill=RECEIPT_TEXT, font=("Consolas", 9, "bold"), tags="drawn")
+
             c.create_line(left + 10, row_y + 10, right - 10, row_y + 10,
                           fill=RECEIPT_LINE, tags="drawn")
             row_y += RECEIPT_ROW_HEIGHT
+
+        return needs_marquee
+
+    def _ensure_marquee_running(self) -> None:
+        if self._marquee_job is None:
+            self._marquee_job = self.root.after(MARQUEE_INTERVAL, self._marquee_tick)
+
+    def _stop_marquee(self) -> None:
+        if self._marquee_job is not None:
+            self.root.after_cancel(self._marquee_job)
+            self._marquee_job = None
+        self._marquee_offset = 0.0
+
+    def _marquee_tick(self) -> None:
+        self._marquee_job = None
+        self._marquee_offset += MARQUEE_INTERVAL / 1000.0
+        self._draw_scene()
 
     def _draw_orb(self) -> None:
         c = self.canvas
