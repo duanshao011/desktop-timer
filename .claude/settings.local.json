@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m unittest discover -s tests -v)",
+      "Bash(python -m compileall src tests)",
+      "Bash(python -m unittest discover -s tests)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
