@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from .task_history import (
     CompletedTask,
     RunningTask,
+    format_duration,
     format_task_row,
     merge_into_completed,
 )
@@ -39,6 +40,7 @@ TASK_ROW_HEIGHT = 28
 RECEIPT_TOP_OFFSET = 2
 RECEIPT_HEADER_HEIGHT = 32
 RECEIPT_ROW_HEIGHT = 20
+RECEIPT_TOTAL_HEIGHT = 22
 RECEIPT_FOOTER = 10
 
 MARQUEE_SPEED = 50
@@ -75,6 +77,8 @@ class TimerApp:
         self.task_var = tk.StringVar()
         self._marquee_offset = 0.0
         self._marquee_job: str | None = None
+        self._copy_feedback_active = False
+        self._copy_feedback_job: str | None = None
         self._time_font = tkfont.Font(family="Consolas", size=9, weight="bold")
         self._name_font = tkfont.Font(family="Microsoft YaHei UI", size=8)
         self._running_name_font = tkfont.Font(family="Microsoft YaHei UI", size=9)
@@ -122,6 +126,8 @@ class TimerApp:
         if self.tasks_expanded:
             rows = len(self.completed_tasks) if self.completed_tasks else 1
             receipt_h = RECEIPT_HEADER_HEIGHT + rows * RECEIPT_ROW_HEIGHT + RECEIPT_FOOTER
+            if self.completed_tasks:
+                receipt_h += RECEIPT_TOTAL_HEIGHT
             total += RECEIPT_TOP_OFFSET + receipt_h + 6
         return total
 
@@ -190,16 +196,63 @@ class TimerApp:
         arrow = "▾" if self.tasks_expanded else "▸"
         label = f"{arrow}{count}"
         label_color = TEXT_PRIMARY if count or self.tasks_expanded else TEXT_MUTED
+        toggle_x = 188 if count else 200
+        hot_left = 170 if count else 178
+        hot_right = 208 if count else BAR_WIDTH - 3
         text = c.create_text(
-            200, CY, text=label, fill=label_color,
+            toggle_x, CY, text=label, fill=label_color,
             font=("Consolas", 10, "bold"), tags="drawn",
         )
-        hot = c.create_rectangle(178, 3, BAR_WIDTH - 3, BAR_HEIGHT - 3,
+        hot = c.create_rectangle(hot_left, 3, hot_right, BAR_HEIGHT - 3,
                                  fill="", outline="", tags="drawn")
         for it in (hot, text):
             c.tag_bind(it, "<Button-1>", self._toggle_tasks)
             c.tag_bind(it, "<Enter>", lambda _e: c.configure(cursor="hand2"))
             c.tag_bind(it, "<Leave>", lambda _e: c.configure(cursor=""))
+        if count:
+            self._draw_copy_button(224, CY)
+
+    def _draw_copy_button(self, cx: int, cy: int) -> None:
+        c = self.canvas
+        items: list[int] = []
+        items.append(c.create_rectangle(cx - 10, 3, BAR_WIDTH - 3, BAR_HEIGHT - 3,
+                                        fill="", outline="", tags="drawn"))
+        if self._copy_feedback_active:
+            items.append(c.create_text(cx, cy, text="✓", fill=GREEN,
+                                       font=("Consolas", 10, "bold"), tags="drawn"))
+        else:
+            items.append(c.create_rectangle(cx, cy - 7, cx + 7, cy,
+                                            outline=TEXT_MUTED, fill="", width=1, tags="drawn"))
+            items.append(c.create_rectangle(cx - 5, cy - 2, cx + 2, cy + 5,
+                                            outline=TEXT_PRIMARY, fill=BG_DARK, width=1, tags="drawn"))
+        for it in items:
+            c.tag_bind(it, "<Button-1>", lambda _e: self._copy_completed_tasks())
+            c.tag_bind(it, "<Enter>", lambda _e: c.configure(cursor="hand2"))
+            c.tag_bind(it, "<Leave>", lambda _e: c.configure(cursor=""))
+
+    def _copy_completed_tasks(self) -> None:
+        if not self.completed_tasks:
+            return
+        lines = []
+        for task in self.completed_tasks:
+            started, duration, name = format_task_row(task)
+            if task.merge_count >= 2:
+                name = f"{name} ×{task.merge_count}"
+            lines.append(f"{name} | {started} | {duration}")
+        total_dur = sum((t.duration for t in self.completed_tasks), timedelta())
+        lines.append(f"累计: {format_duration(total_dur)}")
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines))
+        if self._copy_feedback_job is not None:
+            self.root.after_cancel(self._copy_feedback_job)
+        self._copy_feedback_active = True
+        self._draw_scene()
+        self._copy_feedback_job = self.root.after(800, self._clear_copy_feedback)
+
+    def _clear_copy_feedback(self) -> None:
+        self._copy_feedback_job = None
+        self._copy_feedback_active = False
+        self._draw_scene()
 
     def _draw_running_rows(self) -> bool:
         c = self.canvas
@@ -298,6 +351,8 @@ class TimerApp:
         left, right = 20, BAR_WIDTH - 20
         rows = len(self.completed_tasks) if self.completed_tasks else 1
         receipt_h = RECEIPT_HEADER_HEIGHT + rows * RECEIPT_ROW_HEIGHT + RECEIPT_FOOTER
+        if self.completed_tasks:
+            receipt_h += RECEIPT_TOTAL_HEIGHT
         bottom = top + receipt_h
         tooth = 8
 
@@ -385,6 +440,16 @@ class TimerApp:
             c.create_line(left + 10, row_y + 10, right - 10, row_y + 10,
                           fill=RECEIPT_LINE, tags="drawn")
             row_y += RECEIPT_ROW_HEIGHT
+
+        sep_y = row_y - 4
+        c.create_line(left + 10, sep_y, right - 10, sep_y,
+                      fill=RECEIPT_LINE, dash=(3, 3), tags="drawn")
+        label_y = row_y + 6
+        total_dur = sum((t.duration for t in self.completed_tasks), timedelta())
+        c.create_text(left + 10, label_y, text="累计", anchor="w",
+                      fill=RECEIPT_MUTED, font=("Microsoft YaHei UI", 8), tags="drawn")
+        c.create_text(right - 10, label_y, text=format_duration(total_dur), anchor="e",
+                      fill=RECEIPT_TEXT, font=("Consolas", 9, "bold"), tags="drawn")
 
         return needs_marquee
 
